@@ -55,12 +55,55 @@ ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --no-terminal
 The done marker contains Codex's exit code. Once it appears:
 
 1. Read the marker. `0` means Codex finished; anything else means the run failed.
-2. On success, read the last-message file (path printed by the script), then offer
-   to run `/codex:adversarial-review --base HEAD` to review what Codex changed.
+2. On success, read the last-message file, then review the implementation (below).
 3. On failure, dump the pane tail to diagnose
    (`zellij --session SESSION action dump-screen --pane-id PANE`) and report the
    error — do not present the run as complete.
-4. Report the summary and ask how to proceed.
+
+## Review the implementation
+
+Codex's last message is its own summary of its own work. Do not relay it as the
+result — review the actual diff first (`git status --short`, `git diff`, and any
+new untracked files).
+
+Reviewer posture: pragmatic review for a serious small experiment. Judge the
+diff against, in order:
+
+1. **The plan** — was it followed? Did Codex deviate, and did it call the
+   deviation out and justify it? An unannounced deviation is a finding even
+   when the code is fine.
+2. **Project constraints** — the repo's AGENTS.md rules: style, stack, scope,
+   privacy/safety boundaries. A violation of a stated rule is a finding.
+3. **Correctness** — bugs, broken flows, tests that pass without testing the
+   behavior, missing essential cases.
+
+Do not be pedantic: no style preferences beyond the project's stated rules, no
+speculative scale or robustness concerns, no "this might matter someday"
+findings, no refactors the plan did not ask for.
+
+Run the project's check command and include the result.
+
+Then report a triage checkpoint and stop for the user's go-ahead before editing:
+
+```md
+Codex implemented: [one-paragraph summary, from the diff not the last message]
+
+I agree with:
+- [decision/finding]: [why it is right]
+
+I disagree with:
+- [finding]: [why, and the smallest fix]
+
+Checks: [check command result]
+
+Plan of action:
+- [ordered fixes; for each, whether to fix directly or loop back to Codex]
+```
+
+If there are no findings, say so plainly and note any residual risk or test gap.
+Offer `/codex:adversarial-review --base HEAD` as escalation when the diff is
+large, touches a trust or privacy boundary, or your confidence is low — not as
+the default.
 
 ## Observation policy
 
