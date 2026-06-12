@@ -83,24 +83,29 @@ findings, no refactors the plan did not ask for.
 
 Run the project's check command and include the result.
 
-Then report a triage checkpoint and stop for the user's go-ahead before editing:
+Then walk the user through what came back and stop for their go-ahead before
+editing:
 
 ```md
 Codex implemented: [one-paragraph summary, from the diff not the last message]
 
-I agree with:
-- [decision/finding]: [why it is right]
+Holds up:
+- [decision]: [why it is right]
 
-I disagree with:
+Worth changing:
 - [finding]: [why, and the smallest fix]
+
+Open questions:
+- [anything only the user can decide — scope, tradeoffs, taste]
 
 Checks: [check command result]
 
-Plan of action:
+Next steps:
 - [ordered fixes; for each, whether to fix directly or loop back to Codex]
 ```
 
-If there are no findings, say so plainly and note any residual risk or test gap.
+If nothing is worth changing, say so plainly and note any residual risk or test
+gap. Skip empty sections.
 Offer `/codex:adversarial-review --base HEAD` as escalation when the diff is
 large, touches a trust or privacy boundary, or your confidence is low — not as
 the default.
