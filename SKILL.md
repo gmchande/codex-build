@@ -14,6 +14,8 @@ pane. A done-marker and last-message file let you poll for completion without bl
 - Zellij: `brew install zellij`
 - `ZELLIJ_SOCKET_DIR` in shell startup: `export ZELLIJ_SOCKET_DIR=/tmp/zellij`
 - Codex CLI installed and authenticated: `npm install -g @openai/codex && codex login`
+- Ghostty for the auto-opened attach tab (optional — without it, use the printed
+  `zellij attach` command from any terminal)
 
 ## Run the script
 

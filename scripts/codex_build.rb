@@ -257,42 +257,14 @@ def ghostty_script(attach_cmd, repo_root)
   APPLESCRIPT
 end
 
-def iterm2_script(attach_cmd)
-  <<~APPLESCRIPT
-    tell application "iTerm2"
-      tell current window
-        create tab with default profile command #{applescript_string(attach_cmd)}
-      end tell
-      activate
-    end tell
-  APPLESCRIPT
-end
-
-def terminal_app_script(attach_cmd)
-  <<~APPLESCRIPT
-    tell application "Terminal"
-      do script #{applescript_string(attach_cmd)}
-      activate
-    end tell
-  APPLESCRIPT
-end
-
 def open_terminal_window(session, repo_root)
   socket_dir  = ENV.fetch("ZELLIJ_SOCKET_DIR", "")
   attach_inner = "export ZELLIJ_SOCKET_DIR=#{socket_dir.shellescape}; " \
                  "zellij attach #{session.shellescape}; exec /bin/zsh -l"
   attach_cmd  = "/bin/zsh -lc #{Shellwords.escape(attach_inner)}"
 
-  [
-    ghostty_script(attach_cmd, repo_root),
-    iterm2_script(attach_cmd),
-    terminal_app_script(attach_cmd)
-  ].each do |script|
-    _stdout, _stderr, status = Open3.capture3("osascript", stdin_data: script)
-    return true if status.success?
-  end
-
-  false
+  _stdout, _stderr, status = Open3.capture3("osascript", stdin_data: ghostty_script(attach_cmd, repo_root))
+  status.success?
 end
 
 def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_path:, terminal_opened:)
@@ -335,6 +307,10 @@ unless inside_git_repo?
   warn "Not inside a git repository. Run from the project repo you want Codex to build."
   exit 1
 end
+
+# Resolve the plan path against the invoking directory before chdir to the repo
+# root, so a cwd-relative --plan works when invoked from a subdirectory.
+options[:plan] = File.expand_path(options[:plan]) if options[:plan]
 
 root    = git_repo_root
 Dir.chdir(root)
