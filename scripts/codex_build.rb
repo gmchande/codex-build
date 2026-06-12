@@ -187,10 +187,10 @@ def launch_codex_pane(session:, repo_root:, task_path:, last_msg_path:, done_pat
   codex_cmd.push("-m", model) if model
   codex_cmd.push("-")
 
-  # Use ; not && so the done marker is always written, even when codex exits non-zero.
-  # Without this, auth failures or CLI errors leave the marker missing and the
-  # completion poll never resolves.
-  shell_cmd = "#{codex_cmd.shelljoin} < #{task_path.shellescape}; touch #{done_path.shellescape}"
+  # The marker is always written and carries codex's exit code, so a failed run
+  # (auth error, CLI crash) is distinguishable from success without inspecting
+  # the pane. `touch` or `&&` would make failure look like a hung or green run.
+  shell_cmd = "#{codex_cmd.shelljoin} < #{task_path.shellescape}; echo $? > #{done_path.shellescape}"
 
   _stdout, stderr, status = zellij("attach", "--create-background", session, allow_failure: true)
   unless status.success?
@@ -281,8 +281,9 @@ def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_
     puts
   end
 
-  puts "Completion check:"
-  puts "  test -f #{done_path.shellescape} && cat #{last_msg_path.shellescape}"
+  puts "Completion check (marker holds codex's exit code; 0 means read the last message):"
+  puts "  test -f #{done_path.shellescape} && cat #{done_path.shellescape}"
+  puts "  cat #{last_msg_path.shellescape}"
   puts
   puts "Interrupt:"
   puts "  zellij --session #{session.shellescape} action send-keys --pane-id #{pane_id} Esc"

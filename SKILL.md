@@ -52,17 +52,21 @@ ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --no-terminal
 
 ## After Codex finishes
 
-Once the done marker appears:
+The done marker contains Codex's exit code. Once it appears:
 
-1. Read the last-message file (path printed by the script).
-2. Offer to run `/codex:adversarial-review --base HEAD` to review what Codex changed.
-3. Report the summary and ask how to proceed.
+1. Read the marker. `0` means Codex finished; anything else means the run failed.
+2. On success, read the last-message file (path printed by the script), then offer
+   to run `/codex:adversarial-review --base HEAD` to review what Codex changed.
+3. On failure, dump the pane tail to diagnose
+   (`zellij --session SESSION action dump-screen --pane-id PANE`) and report the
+   error — do not present the run as complete.
+4. Report the summary and ask how to proceed.
 
 ## Observation policy
 
 Let the user watch in Zellij. Check the done marker after 2-3 minutes, then poll cheaply:
-`test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request or to diagnose
-a stall. Use `dump-screen` (viewport only) rather than full transcript dumps.
+`test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request, on a non-zero
+marker, or to diagnose a stall. Use `dump-screen` (viewport only) rather than full transcript dumps.
 
 ## Do not use for
 
