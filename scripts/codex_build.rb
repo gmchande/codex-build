@@ -217,7 +217,22 @@ def launch_codex_pane(session:, repo_root:, task_path:, last_msg_path:, done_pat
     exit 1
   end
 
+  close_other_terminal_panes(session, pane_id)
   pane_id
+end
+
+def close_other_terminal_panes(session, pane_id)
+  # `attach --create-background` seeds the session with a default shell pane;
+  # close it so the attached view shows only the Codex pane.
+  stdout, _stderr, status = zellij("--session", session, "action", "list-panes", allow_failure: true)
+  return unless status.success?
+
+  stdout.each_line do |line|
+    other_pane_id = line[/\A(terminal_\d+)\s+terminal\b/, 1]
+    next if other_pane_id.nil? || other_pane_id == pane_id
+
+    zellij("--session", session, "action", "close-pane", "--pane-id", other_pane_id, allow_failure: true)
+  end
 end
 
 def applescript_string(value)
