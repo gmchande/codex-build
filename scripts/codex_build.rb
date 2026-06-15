@@ -25,7 +25,7 @@ options = {
   intent:     nil,
   check:      nil,
   session:    nil,
-  sandbox:    "danger-full-access",
+  sandbox:    "workspace-write",
   effort:     nil,
   model:      nil,
   dry_run:     false,
@@ -38,7 +38,7 @@ OptionParser.new do |opts|
   opts.on("--intent TEXT",  "Short intent string (alternative to --plan)")                  { |v| options[:intent]     = v }
   opts.on("--check CMD",    "Check command to run on completion (auto-detected if omitted)") { |v| options[:check]     = v }
   opts.on("--session NAME", "Zellij session name (default: codex-build-HHMMSS)")            { |v| options[:session]   = v }
-  opts.on("--sandbox MODE", "Codex sandbox mode (default: danger-full-access)")             { |v| options[:sandbox]   = v }
+  opts.on("--sandbox MODE", "Codex sandbox mode (default: workspace-write)")             { |v| options[:sandbox]   = v }
   opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh)") { |v| options[:effort]    = v }
   opts.on("--model MODEL",  "Codex model")                                                   { |v| options[:model]    = v }
   opts.on("--dry-run",      "Print the prompt bundle without running")                      {      options[:dry_run]     = true }
@@ -281,9 +281,9 @@ def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_
     puts
   end
 
-  puts "Completion check (marker holds codex's exit code; 0 means read the last message):"
+  puts "Completion check (marker holds codex's exit code):"
   puts "  test -f #{done_path.shellescape} && cat #{done_path.shellescape}"
-  puts "  cat #{last_msg_path.shellescape}"
+  puts "  test -f #{done_path.shellescape} && [ \"$(cat #{done_path.shellescape})\" = \"0\" ] && cat #{last_msg_path.shellescape}"
   puts
   puts "Interrupt:"
   puts "  zellij --session #{session.shellescape} action send-keys --pane-id #{pane_id} Esc"

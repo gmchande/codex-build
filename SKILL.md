@@ -106,9 +106,9 @@ Next steps:
 
 If nothing is worth changing, say so plainly and note any residual risk or test
 gap. Skip empty sections.
-Offer `/codex:adversarial-review --base HEAD` as escalation when the diff is
-large, touches a trust or privacy boundary, or your confidence is low — not as
-the default.
+When the diff is large, touches a trust or privacy boundary, or your confidence
+is low, escalate to a deeper independent review (a second reviewer or a dedicated
+review tool) rather than treating this pass as the last word. Not by default.
 
 ## Observation policy
 
@@ -118,6 +118,6 @@ marker, or to diagnose a stall. Use `dump-screen` (viewport only) rather than fu
 
 ## Do not use for
 
-- Code review — use `/codex:review` or `/codex:adversarial-review`
-- Bug investigation — use `/codex:rescue`
+- Code review: use a dedicated code-review tool or fresh-eyes review pass
+- Bug investigation: drive it directly, or use a debugging-focused tool
 - Tasks Claude can complete directly in the current session
