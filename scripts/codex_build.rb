@@ -612,7 +612,11 @@ def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_
   puts "Observe (viewport only):"
   puts "  zellij --session #{session.shellescape} action dump-screen --pane-id #{pane_id}"
   puts
-  puts "Cleanup after triage (skipping cleanup accumulates dead sessions):"
+  puts "Follow up in the same Codex session (from this repo root):"
+  puts "  ruby #{File.expand_path(__FILE__).shellescape} --feedback \"...\""
+  puts "  codex resume --last   # interactive"
+  puts
+  puts "Cleanup (only when the user says they are done with this run; leave the session open for follow-ups otherwise):"
   puts "  zellij kill-session #{session.shellescape}  # if still attached"
   puts "  zellij delete-session --force #{session.shellescape}"
   puts

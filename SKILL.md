@@ -140,9 +140,9 @@ periodic polling. For other clients, fall back to checking the done marker after
 poll cheaply: `test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request or to
 diagnose a still-running stall. Use `dump-screen` (viewport only) rather than full transcript dumps.
 
-After triage is complete, clean up the Zellij session with the printed cleanup command. If it is
-still attached, run `zellij kill-session SESSION` first, then
-`zellij delete-session --force SESSION`. Skipping cleanup accumulates dead sessions.
+Leave the Zellij session open after triage; the user often has follow-up prompts, and both
+`--feedback` and `codex resume --last` reach the same Codex session from the repo root. Clean up
+with the printed commands only when the user says they are done with the run.
 
 ## Do not use for
 

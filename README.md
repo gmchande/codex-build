@@ -67,7 +67,7 @@ If the launch output says the tree was dirty, compare the current `git status --
 
 For harness-driven use, prefer the printed bounded background watcher command. Claude Code re-invokes the session when a background command exits, so this is better than periodic polling. For other clients, fall back to checking the done marker after 2-3 minutes, then polling cheaply.
 
-After triage is complete, run the printed cleanup command. If the session is still attached, run `zellij kill-session SESSION` first, then `zellij delete-session --force SESSION`. Skipping cleanup accumulates dead sessions.
+Leave the Zellij session open after triage for follow-ups; `--feedback` and `codex resume --last` reach the same Codex session from the repo root. Run the printed cleanup commands only when the user says they are done.
 
 ## Security
 
