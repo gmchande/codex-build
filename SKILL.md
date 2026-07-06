@@ -1,13 +1,15 @@
 ---
 name: codex-build
-description: Delegate an implementation task to Codex CLI in a visible Zellij pane, injecting AGENTS.md project constraints into the brief. Use when the user wants to implement a plan or PRD with Codex, says "have Codex build this", "send this to Codex", "delegate to Codex", or "/codex-build".
+description: Delegate an implementation task to Codex CLI in a visible Zellij pane, injecting ancestor AGENTS.md/CLAUDE.md and repo-root .claude/CLAUDE.md project constraints into the brief. Use when the user wants to implement a plan or PRD with Codex, says "have Codex build this", "send this to Codex", "delegate to Codex", or "/codex-build".
 ---
 
 # codex-build
 
-Delegate an implementation task to Codex. The script reads the repo's AGENTS.md (or CLAUDE.md),
-builds a structured prompt with project constraints, and launches `codex exec` in a visible Zellij
-pane. A done-marker and last-message file let you poll for completion without blocking the session.
+Delegate an implementation task to Codex. The script reads authority files (`AGENTS.md` then
+`CLAUDE.md`) from broader ancestor directories through the repo root, plus repo-root
+`.claude/CLAUDE.md`, builds a structured prompt with project constraints, and launches `codex exec`
+in a visible Zellij pane. A done-marker, last-message file, and pre-run tree snapshot let you
+observe completion without blocking the session.
 
 ## Requirements
 
@@ -16,6 +18,8 @@ pane. A done-marker and last-message file let you poll for completion without bl
 - Codex CLI installed and authenticated: `npm install -g @openai/codex && codex login`
 - Ghostty for the auto-opened attach tab (optional — without it, use the printed
   `zellij attach` command from any terminal)
+
+Run `ruby $SKILL_BASE/scripts/codex_build.rb --doctor` to check required and optional local tools.
 
 ## Run the script
 
@@ -45,6 +49,9 @@ ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --dry-run
 
 # Skip opening a terminal window attached to the session
 ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --no-terminal
+
+# Send accepted review findings back to the latest Codex session for this repo
+ruby $SKILL_BASE/scripts/codex_build.rb --feedback "Fix only these accepted findings: ..."
 ```
 
 4. The script prints the done-marker path and completion check command. Share these with the user
@@ -59,6 +66,9 @@ The done marker contains Codex's exit code. Once it appears:
 3. On failure, dump the pane tail to diagnose
    (`zellij --session SESSION action dump-screen --pane-id PANE`) and report the
    error — do not present the run as complete.
+
+If the launch output says the tree was dirty, compare `git status --short` and `git diff` against
+the printed `pre.status` and `pre.diff` files before attributing a change to Codex.
 
 ## Review the implementation
 
@@ -110,11 +120,29 @@ When the diff is large, touches a trust or privacy boundary, or your confidence
 is low, escalate to a deeper independent review (a second reviewer or a dedicated
 review tool) rather than treating this pass as the last word. Not by default.
 
+## Feedback loop
+
+Use `--feedback TEXT` only after the review checkpoint above, and send only user-accepted findings
+back to the same Codex session. It runs `codex exec resume --last` from the repo root with a small
+feedback prompt; it does not re-inject the project context bundle. `--feedback` is mutually
+exclusive with `--plan` and `--intent`.
+
+Use `--dry-run --feedback "..."` to inspect the resume command and feedback prompt before launching.
+Explicit `--model` and `--effort` are passed to resume only when the installed Codex CLI reports
+support for those flags; otherwise the resumed session keeps its original settings.
+
 ## Observation policy
 
-Let the user watch in Zellij. Check the done marker after 2-3 minutes, then poll cheaply:
-`test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request, on a non-zero
-marker, or to diagnose a stall. Use `dump-screen` (viewport only) rather than full transcript dumps.
+Let the user watch in Zellij. For harness-driven use, prefer the printed bounded background watcher
+command; Claude Code re-invokes the session when a background command exits, which is better than
+periodic polling. For other clients, fall back to checking the done marker after 2-3 minutes, then
+poll cheaply: `test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request, on a
+non-zero marker, or to diagnose a stall. Use `dump-screen` (viewport only) rather than full
+transcript dumps.
+
+After triage is complete, clean up the Zellij session with the printed cleanup command. If it is
+still attached, run `zellij kill-session SESSION` first, then
+`zellij delete-session --force SESSION`. Skipping cleanup accumulates dead sessions.
 
 ## Do not use for
 

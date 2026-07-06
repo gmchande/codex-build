@@ -4,13 +4,16 @@
 require "fileutils"
 require "open3"
 require "optparse"
+require "pathname"
 require "shellwords"
 require "tmpdir"
 
-CONTEXT_FILES   = %w[AGENTS.md CLAUDE.md .claude/CLAUDE.md].freeze
-MAX_CONTEXT_BYTES = 100_000
-MAX_PLAN_BYTES    = 200_000
-CHECK_PATTERNS  = [
+AUTHORITY_CONTEXT_FILES           = %w[AGENTS.md CLAUDE.md].freeze
+REPO_ROOT_AUTHORITY_CONTEXT_FILES = (AUTHORITY_CONTEXT_FILES + %w[.claude/CLAUDE.md]).freeze
+MAX_CONTEXT_BYTES                 = 100_000
+MAX_CONTEXT_BUNDLE_BYTES          = 240_000
+MAX_PLAN_BYTES                    = 200_000
+CHECK_PATTERNS                    = [
   /bundle exec rake \w+/,
   /rake (?:check|test)/,
   /npm test/,
@@ -21,26 +24,38 @@ CHECK_PATTERNS  = [
 ].freeze
 
 options = {
-  plan:       nil,
-  intent:     nil,
-  check:      nil,
-  session:    nil,
-  sandbox:    "workspace-write",
-  effort:     nil,
-  model:      nil,
-  dry_run:     false,
-  no_terminal: false
+  plan:             nil,
+  intent:           nil,
+  feedback:         nil,
+  check:            nil,
+  session:          nil,
+  sandbox:          "workspace-write",
+  effort:           nil,
+  model:            nil,
+  explicit_sandbox: false,
+  doctor:           false,
+  dry_run:          false,
+  no_terminal:      false
 }
 
 OptionParser.new do |opts|
   opts.banner = "Usage: codex_build.rb [options]"
   opts.on("--plan PATH",    "Plan or PRD file to implement")                                { |v| options[:plan]       = v }
   opts.on("--intent TEXT",  "Short intent string (alternative to --plan)")                  { |v| options[:intent]     = v }
+  opts.on("--feedback TEXT", "Send review findings to the most recent Codex session")       { |v| options[:feedback]   = v }
   opts.on("--check CMD",    "Check command to run on completion (auto-detected if omitted)") { |v| options[:check]     = v }
   opts.on("--session NAME", "Zellij session name (default: codex-build-HHMMSS)")            { |v| options[:session]   = v }
-  opts.on("--sandbox MODE", "Codex sandbox mode (default: workspace-write)")             { |v| options[:sandbox]   = v }
-  opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh)") { |v| options[:effort]    = v }
-  opts.on("--model MODEL",  "Codex model")                                                   { |v| options[:model]    = v }
+  opts.on("--sandbox MODE", "Codex sandbox mode (default: workspace-write)") do |v|
+    options[:sandbox] = v
+    options[:explicit_sandbox] = true
+  end
+  opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh)") do |v|
+    options[:effort] = v
+  end
+  opts.on("--model MODEL",  "Codex model") do |v|
+    options[:model] = v
+  end
+  opts.on("--doctor",       "Check local dependencies and exit")                            {      options[:doctor]      = true }
   opts.on("--dry-run",      "Print the prompt bundle without running")                      {      options[:dry_run]     = true }
   opts.on("--no-terminal",  "Skip opening a terminal window attached to the session")       {      options[:no_terminal] = true }
   opts.on("-h", "--help",   "Show help") { puts opts; exit 0 }
@@ -64,9 +79,28 @@ def command_available?(name)
   status.success?
 end
 
+def command_path(name)
+  stdout, _stderr, status = run_command("sh", "-c", "command -v #{Shellwords.escape(name)}", allow_failure: true)
+  status.success? ? stdout.strip : nil
+end
+
 def inside_git_repo?
   _stdout, _stderr, status = run_command("git", "rev-parse", "--is-inside-work-tree", allow_failure: true)
   status.success?
+end
+
+def git_ref_exists?(ref)
+  _stdout, _stderr, status = run_command("git", "rev-parse", "--verify", "--quiet", ref, allow_failure: true)
+  status.success?
+end
+
+def head_exists?
+  git_ref_exists?("HEAD")
+end
+
+def empty_tree_ref
+  stdout, _stderr, _status = run_command("git", "hash-object", "-t", "tree", "/dev/null")
+  stdout.strip
 end
 
 def git_repo_root
@@ -77,11 +111,14 @@ end
 def session_name(options)
   return options[:session] if options[:session]
 
-  "codex-build-#{Time.now.strftime("%H%M%S")}"
+  prefix = options[:feedback] ? "codex-feedback" : "codex-build"
+  "#{prefix}-#{Time.now.strftime("%H%M%S")}"
 end
 
-def find_context_file(root)
-  CONTEXT_FILES.map { |f| File.join(root, f) }.find { |p| File.file?(p) }
+def likely_text_file?(path)
+  File.file?(path) && !File.binread(path, 4096).to_s.include?("\x00")
+rescue Errno::ENOENT, Errno::EACCES
+  false
 end
 
 def truncate_text(text, max_bytes, label)
@@ -91,10 +128,111 @@ def truncate_text(text, max_bytes, label)
   ["#{truncated}\n\n... #{label} truncated at #{max_bytes} bytes ...", true]
 end
 
+def project_context_dirs(repo_root)
+  dirs = []
+  current = File.expand_path(repo_root)
+  home = File.expand_path(Dir.home)
+
+  loop do
+    dirs << current
+    break if current == home || current == "/"
+
+    parent = File.dirname(current)
+    break if parent == current
+
+    current = parent
+  end
+
+  dirs.reverse
+end
+
+def project_context_paths(repo_root)
+  seen = {}
+  expanded_root = File.expand_path(repo_root)
+
+  project_context_dirs(repo_root).flat_map do |dir|
+    names = File.expand_path(dir) == expanded_root ? REPO_ROOT_AUTHORITY_CONTEXT_FILES : AUTHORITY_CONTEXT_FILES
+    names.map { |name| File.join(dir, name) }
+  end.select do |path|
+    if File.file?(path) && !seen[path]
+      seen[path] = true
+    end
+  end
+end
+
+def repo_root_authority_paths(repo_root)
+  REPO_ROOT_AUTHORITY_CONTEXT_FILES.map { |name| File.join(repo_root, name) }.select { |path| File.file?(path) }
+end
+
+def relative_context_path(path, repo_root)
+  Pathname.new(path).relative_path_from(Pathname.new(repo_root)).to_s
+rescue ArgumentError
+  path
+end
+
+def project_context_file_section(path, repo_root)
+  label = relative_context_path(path, repo_root)
+
+  if !likely_text_file?(path)
+    ["### #{label}\n\nSkipped: not a readable text file.\n", false]
+  else
+    text, truncated = truncate_text(File.read(path), MAX_CONTEXT_BYTES, "project context #{label}")
+    notice = truncated ? "Truncated: file exceeded #{MAX_CONTEXT_BYTES} bytes.\n\n" : ""
+    ["### #{label}\n\n#{notice}```markdown\n#{text}\n```\n", truncated]
+  end
+rescue Errno::ENOENT, Errno::EACCES
+  ["### #{label}\n\nSkipped: file disappeared or became unreadable.\n", false]
+end
+
+def project_context_bundle(repo_root)
+  paths = project_context_paths(repo_root)
+  return ["", []] if paths.empty?
+
+  sections = []
+  truncated = []
+  total_bytes = 0
+
+  paths.each do |path|
+    section, section_truncated = project_context_file_section(path, repo_root)
+    section_bytes = section.bytesize
+
+    if total_bytes + section_bytes > MAX_CONTEXT_BUNDLE_BYTES
+      label = relative_context_path(path, repo_root)
+      sections << "### #{label}\n\nSkipped: project context bundle exceeded #{MAX_CONTEXT_BUNDLE_BYTES} bytes.\n"
+      truncated << label
+      break
+    end
+
+    total_bytes += section_bytes
+    sections << section
+    truncated << relative_context_path(path, repo_root) if section_truncated
+  end
+
+  [
+    <<~TEXT,
+      Project context (auto-loaded from authority files; broader ancestor files appear first and closer files override earlier guidance):
+
+      #{sections.join("\n")}
+    TEXT
+    truncated
+  ]
+end
+
 def extract_check_command(text)
   # Earliest match in the file wins, not first pattern in the list: a doc that
   # leads with its check command should beat an incidental mention later on.
-  CHECK_PATTERNS.filter_map { |pattern| text.match(pattern) }.min_by { |m| m.begin(0) }&.to_s
+  CHECK_PATTERNS.map { |pattern| text.match(pattern) }.compact.min_by { |m| m.begin(0) }&.to_s
+end
+
+def detect_check_command(repo_root)
+  repo_root_authority_paths(repo_root).each do |path|
+    next unless likely_text_file?(path)
+
+    command = extract_check_command(File.read(path))
+    return command if command
+  end
+
+  nil
 end
 
 def read_plan(path)
@@ -106,6 +244,19 @@ def read_plan(path)
   end
 
   truncate_text(File.read(path), MAX_PLAN_BYTES, "plan").first
+end
+
+def final_message_contract
+  <<~XML.chomp
+    <final_message>
+    Codex's final message must be Markdown with exactly these sections, in this order:
+    - Files changed
+    - Deviations from the plan — each with why; write "None" explicitly if none
+    - Commands run and their results
+    - Known gaps / risks
+    - Questions needing the user's decision
+    </final_message>
+  XML
 end
 
 def build_prompt(plan_text:, intent:, context_text:, check_cmd:, repo_root:, session:)
@@ -125,8 +276,33 @@ def build_prompt(plan_text:, intent:, context_text:, check_cmd:, repo_root:, ses
   XML
 
   parts << "<verification>\nWhen done, run: #{check_cmd}\n</verification>" if check_cmd
+  parts << final_message_contract
 
   "# Codex Build — #{File.basename(repo_root)} / #{session}\n\n" + parts.join("\n\n")
+end
+
+def build_feedback_prompt(feedback:, check_cmd:, repo_root:, session:)
+  parts = ["<feedback>\n#{feedback.strip}\n</feedback>"]
+
+  check_instruction = if check_cmd
+                        "When done, rerun: #{check_cmd}"
+                      else
+                        "When done, rerun the check command from the original task if one is known."
+                      end
+
+  parts << <<~XML.chomp
+    <instructions>
+    Fix only the findings listed in <feedback>.
+    Keep changes tightly scoped.
+    Do not revisit or expand other parts of the earlier task.
+    #{check_instruction}
+    End with the final-message contract in <final_message>.
+    </instructions>
+  XML
+
+  parts << final_message_contract
+
+  "# Codex Feedback — #{File.basename(repo_root)} / #{session}\n\n" + parts.join("\n\n")
 end
 
 def ensure_command!(name, install_hint)
@@ -154,10 +330,61 @@ def ensure_zellij_socket_dir!
   end
 end
 
+def macos_app_available?(name)
+  return false unless command_available?("osascript")
+
+  _stdout, _stderr, status = run_command("osascript", "-e", "id of application \"#{name}\"", allow_failure: true)
+  status.success?
+end
+
+def doctor!
+  required_checks = []
+  required_checks << ["git", command_available?("git")]
+  required_checks << ["ruby", command_available?("ruby")]
+  required_checks << ["zellij", command_available?("zellij")]
+  required_checks << ["codex", command_available?("codex")]
+  required_checks << ["ZELLIJ_SOCKET_DIR", !ENV.fetch("ZELLIJ_SOCKET_DIR", "").empty?]
+
+  optional_checks = []
+  optional_checks << ["osascript", command_available?("osascript")]
+  optional_checks << ["Ghostty.app", macos_app_available?("Ghostty")]
+
+  required_checks.each do |label, ok|
+    puts "#{ok ? "OK" : "MISSING"} #{label}"
+  end
+
+  optional_checks.each do |label, ok|
+    puts "#{ok ? "OK" : "OPTIONAL_MISSING"} #{label}"
+  end
+
+  exit(required_checks.all? { |_label, ok| ok } ? 0 : 1)
+end
+
 def setup_temp_dir(session)
   dir = File.join(Dir.tmpdir, "codex-build-#{session}")
-  FileUtils.mkdir_p(dir)
+  FileUtils.mkdir_p(dir, mode: 0o700)
+  FileUtils.chmod(0o700, dir)
   dir
+end
+
+def write_private_file(path, content)
+  File.open(path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+    file.write(content)
+  end
+  FileUtils.chmod(0o600, path)
+end
+
+def write_pre_run_snapshot(temp_dir)
+  status, _stderr, _status = run_command("git", "status", "--short")
+  comparison = head_exists? ? "HEAD" : empty_tree_ref
+  diff, _diff_stderr, _diff_status = run_command("git", "diff", "--no-ext-diff", comparison, "--")
+  status_path = File.join(temp_dir, "pre.status")
+  diff_path = File.join(temp_dir, "pre.diff")
+
+  write_private_file(status_path, status)
+  write_private_file(diff_path, diff)
+
+  [status_path, diff_path, !status.strip.empty?]
 end
 
 def zellij(*args, allow_failure: false)
@@ -181,16 +408,72 @@ def delete_zellij_session(name)
   zellij("delete-session", "--force", name, allow_failure: true)
 end
 
-def launch_codex_pane(session:, repo_root:, task_path:, last_msg_path:, done_path:, sandbox:, effort:, model:)
+def codex_exec_command(last_msg_path:, sandbox:, effort:, model:)
   codex_cmd = ["codex", "exec", "--sandbox", sandbox, "-o", last_msg_path]
   codex_cmd.push("-c", "model_reasoning_effort=#{effort}") if effort
   codex_cmd.push("-m", model) if model
   codex_cmd.push("-")
+  codex_cmd
+end
 
+def codex_resume_help(required:)
+  unless command_available?("codex")
+    if required
+      warn "codex not found on PATH."
+      exit 1
+    end
+
+    return ""
+  end
+
+  stdout, stderr, status = run_command("codex", "exec", "resume", "--help", allow_failure: true)
+  if !status.success? && required
+    warn "Could not inspect supported flags with: codex exec resume --help"
+    warn stderr unless stderr.empty?
+    exit status.exitstatus || 1
+  end
+
+  "#{stdout}\n#{stderr}"
+end
+
+def resume_supports_option?(help_text, option)
+  case option
+  when "--sandbox"
+    help_text.include?("--sandbox")
+  when "-c"
+    help_text.match?(/(?:^|\s)-c(?:,|\s)/)
+  when "-m"
+    help_text.match?(/(?:^|\s)-m(?:,|\s)/) || help_text.include?("--model")
+  else
+    false
+  end
+end
+
+def codex_resume_command(last_msg_path:, sandbox:, explicit_sandbox:, effort:, model:, help_text:)
+  codex_cmd = ["codex", "exec", "resume", "--last"]
+  codex_cmd.push("--sandbox", sandbox) if explicit_sandbox && resume_supports_option?(help_text, "--sandbox")
+  codex_cmd.push("-c", "model_reasoning_effort=#{effort}") if effort && resume_supports_option?(help_text, "-c")
+  codex_cmd.push("-m", model) if model && resume_supports_option?(help_text, "-m")
+  codex_cmd.push("-o", last_msg_path, "-")
+  codex_cmd
+end
+
+def codex_shell_command(codex_cmd, task_path, done_path)
   # The marker is always written and carries codex's exit code, so a failed run
   # (auth error, CLI crash) is distinguishable from success without inspecting
   # the pane. `touch` or `&&` would make failure look like a hung or green run.
-  shell_cmd = "#{codex_cmd.shelljoin} < #{task_path.shellescape}; echo $? > #{done_path.shellescape}"
+  [
+    "#{codex_cmd.shelljoin} < #{task_path.shellescape}",
+    "rc=$?",
+    "echo $rc > #{done_path.shellescape}",
+    "echo",
+    "echo Codex build exited with status $rc",
+    "exec ${SHELL:-/bin/zsh} -l"
+  ].join("; ")
+end
+
+def launch_codex_pane(session:, repo_root:, task_path:, done_path:, codex_cmd:, pane_name:)
+  shell_cmd = codex_shell_command(codex_cmd, task_path, done_path)
 
   _stdout, stderr, status = zellij("attach", "--create-background", session, allow_failure: true)
   unless status.success?
@@ -200,7 +483,7 @@ def launch_codex_pane(session:, repo_root:, task_path:, last_msg_path:, done_pat
 
   stdout, stderr, status = zellij(
     "--session", session,
-    "run", "--cwd", repo_root, "--name", "Codex Build",
+    "run", "--cwd", repo_root, "--name", pane_name,
     "--", "sh", "-lc", shell_cmd,
     allow_failure: true
   )
@@ -218,6 +501,7 @@ def launch_codex_pane(session:, repo_root:, task_path:, last_msg_path:, done_pat
   end
 
   close_other_terminal_panes(session, pane_id)
+  zellij("--session", session, "action", "focus-pane-id", pane_id, allow_failure: true)
   pane_id
 end
 
@@ -257,33 +541,64 @@ def ghostty_script(attach_cmd, repo_root)
   APPLESCRIPT
 end
 
-def open_terminal_window(session, repo_root)
-  socket_dir  = ENV.fetch("ZELLIJ_SOCKET_DIR", "")
-  attach_inner = "export ZELLIJ_SOCKET_DIR=#{socket_dir.shellescape}; " \
-                 "zellij attach #{session.shellescape}; exec /bin/zsh -l"
-  attach_cmd  = "/bin/zsh -lc #{Shellwords.escape(attach_inner)}"
-
-  _stdout, _stderr, status = Open3.capture3("osascript", stdin_data: ghostty_script(attach_cmd, repo_root))
-  status.success?
+def manual_attach_command(session)
+  "zellij attach #{session.shellescape}"
 end
 
-def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_path:, terminal_opened:)
+def open_terminal_window(session, repo_root)
+  return [false, "osascript is missing; attach manually with: #{manual_attach_command(session)}"] unless command_available?("osascript")
+
+  zellij_path = command_path("zellij")
+  zsh_path = command_path("zsh")
+  unless zellij_path && zsh_path
+    return [false, "Could not resolve zellij or zsh on PATH; attach manually with: #{manual_attach_command(session)}"]
+  end
+
+  socket_dir  = ENV.fetch("ZELLIJ_SOCKET_DIR", "")
+  attach_inner = "export ZELLIJ_SOCKET_DIR=#{socket_dir.shellescape}; " \
+                 "#{zellij_path.shellescape} attach #{session.shellescape}; " \
+                 "cd #{repo_root.shellescape}; exec #{zsh_path.shellescape} -l"
+  attach_cmd  = "#{zsh_path.shellescape} -lc #{Shellwords.escape(attach_inner)}"
+
+  _stdout, stderr, status = Open3.capture3("osascript", stdin_data: ghostty_script(attach_cmd, repo_root))
+  return [true, nil] if status.success?
+
+  detail = stderr.strip.empty? ? "" : " (#{stderr.strip})"
+  [false, "Could not auto-open Ghostty#{detail}; attach manually with: #{manual_attach_command(session)}"]
+end
+
+def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_path:, pre_status_path:, pre_diff_path:, dirty_at_launch:, terminal_opened:, terminal_warning:)
   puts "Codex build started in Zellij session: #{session}"
   puts "Zellij pane:  #{pane_id}"
   puts "Task bundle:  #{task_path}"
   puts "Last message: #{last_msg_path}"
   puts "Done marker:  #{done_path}"
+  puts "Pre status:   #{pre_status_path}"
+  puts "Pre diff:     #{pre_diff_path}"
   puts
+
+  if dirty_at_launch
+    puts "Tree was dirty at launch; compare review findings against the pre-run snapshot before attributing changes to Codex."
+    puts
+  end
+
+  if terminal_warning
+    puts "Warning: #{terminal_warning}"
+    puts
+  end
 
   unless terminal_opened
     puts "Attach:"
-    puts "  zellij attach #{session.shellescape}"
+    puts "  #{manual_attach_command(session)}"
     puts
   end
 
   puts "Completion check (marker holds codex's exit code):"
   puts "  test -f #{done_path.shellescape} && cat #{done_path.shellescape}"
   puts "  test -f #{done_path.shellescape} && [ \"$(cat #{done_path.shellescape})\" = \"0\" ] && cat #{last_msg_path.shellescape}"
+  puts
+  puts "Background watcher (bounded; exits when marker appears):"
+  puts "  for i in $(seq 1 360); do test -f #{done_path.shellescape} && break; sleep 5; done; cat #{done_path.shellescape}"
   puts
   puts "Interrupt:"
   puts "  zellij --session #{session.shellescape} action send-keys --pane-id #{pane_id} Esc"
@@ -292,15 +607,26 @@ def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_
   puts "Observe (viewport only):"
   puts "  zellij --session #{session.shellescape} action dump-screen --pane-id #{pane_id}"
   puts
-  puts "Observation policy: check the done marker after 2-3 minutes; inspect the pane only on request or to diagnose a stall."
+  puts "Cleanup after triage (skipping cleanup accumulates dead sessions):"
+  puts "  zellij kill-session #{session.shellescape}  # if still attached"
+  puts "  zellij delete-session --force #{session.shellescape}"
+  puts
+  puts "Observation policy: prefer the background watcher in harness-driven clients; otherwise check the done marker after 2-3 minutes and inspect the pane only on request or to diagnose a stall."
 end
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-unless options[:plan] || options[:intent]
-  warn "Provide --plan PATH or --intent TEXT."
+doctor! if options[:doctor]
+
+if options[:feedback] && (options[:plan] || options[:intent])
+  warn "Cannot combine --feedback with --plan or --intent."
+  exit 1
+end
+
+unless options[:plan] || options[:intent] || options[:feedback]
+  warn "Provide --plan PATH, --intent TEXT, or --feedback TEXT."
   exit 1
 end
 
@@ -317,29 +643,58 @@ root    = git_repo_root
 Dir.chdir(root)
 session = session_name(options)
 
-context_path = find_context_file(root)
-context_text = context_path && truncate_text(File.read(context_path), MAX_CONTEXT_BYTES, "context").first
-check_cmd    = options[:check] || (context_text && extract_check_command(context_text))
-plan_text    = read_plan(options[:plan])
+context_paths = project_context_paths(root)
+context_text, context_truncated = project_context_bundle(root)
+context_text = nil if context_text.empty?
+check_cmd    = options[:check] || detect_check_command(root)
+plan_text    = options[:feedback] ? nil : read_plan(options[:plan])
 
-prompt = build_prompt(
-  plan_text:    plan_text,
-  intent:       options[:intent],
-  context_text: context_text,
-  check_cmd:    check_cmd,
-  repo_root:    root,
-  session:      session
-)
+prompt = if options[:feedback]
+           build_feedback_prompt(
+             feedback:  options[:feedback],
+             check_cmd: check_cmd,
+             repo_root: root,
+             session:   session
+           )
+         else
+           build_prompt(
+             plan_text:    plan_text,
+             intent:       options[:intent],
+             context_text: context_text,
+             check_cmd:    check_cmd,
+             repo_root:    root,
+             session:      session
+           )
+         end
 
 if options[:dry_run]
   puts "Sandbox: #{options[:sandbox]}"
-  puts "Effort:  #{options[:effort] || "(codex default)"}"
-  puts "Model:   #{options[:model]  || "(codex default)"}"
+  default_settings = options[:feedback] ? "(session settings)" : "(codex default)"
+  puts "Effort:  #{options[:effort] || default_settings}"
+  puts "Model:   #{options[:model]  || default_settings}"
   puts "Session: #{session}"
-  puts "Context: #{context_path    || "(none found)"}"
+  puts "Context: #{context_paths.empty? ? "(none found)" : context_paths.join(", ")}"
+  puts "Context truncation: #{context_truncated.empty? ? "(none)" : context_truncated.join(", ")}"
   puts "Check:   #{check_cmd       || "(none)"}"
   puts
-  puts "## Prompt bundle"
+
+  if options[:feedback]
+    last_msg_path = File.join(Dir.tmpdir, "codex-build-#{session}", "last.md")
+    resume_help = codex_resume_help(required: false)
+    codex_cmd = codex_resume_command(
+      last_msg_path:    last_msg_path,
+      sandbox:          options[:sandbox],
+      explicit_sandbox: options[:explicit_sandbox],
+      effort:           options[:effort],
+      model:            options[:model],
+      help_text:        resume_help
+    )
+    puts "Command: #{codex_cmd.shelljoin}"
+    puts
+    puts "## Feedback prompt"
+  else
+    puts "## Prompt bundle"
+  end
   puts
   puts prompt
   exit 0
@@ -361,22 +716,44 @@ done_path     = File.join(temp_dir, "build.done")
 # Clear stale completion files so a reused --session NAME with the same tmp dir
 # does not report the previous run as finished before the new one completes.
 FileUtils.rm_f([last_msg_path, done_path])
-File.write(task_path, prompt)
+write_private_file(task_path, prompt)
+pre_status_path, pre_diff_path, dirty_at_launch = write_pre_run_snapshot(temp_dir)
+
+codex_cmd = if options[:feedback]
+              resume_help = codex_resume_help(required: true)
+              codex_resume_command(
+                last_msg_path:    last_msg_path,
+                sandbox:          options[:sandbox],
+                explicit_sandbox: options[:explicit_sandbox],
+                effort:           options[:effort],
+                model:            options[:model],
+                help_text:        resume_help
+              )
+            else
+              codex_exec_command(
+                last_msg_path: last_msg_path,
+                sandbox:       options[:sandbox],
+                effort:        options[:effort],
+                model:         options[:model]
+              )
+            end
 
 pane_id = launch_codex_pane(
   session:      session,
   repo_root:    root,
   task_path:    task_path,
-  last_msg_path: last_msg_path,
   done_path:    done_path,
-  sandbox:      options[:sandbox],
-  effort:       options[:effort],
-  model:        options[:model]
+  codex_cmd:    codex_cmd,
+  pane_name:    options[:feedback] ? "Codex Feedback" : "Codex Build"
 )
 
-terminal_opened = !options[:no_terminal] &&
-                  RUBY_PLATFORM.include?("darwin") &&
-                  open_terminal_window(session, root)
+terminal_opened = false
+terminal_warning = nil
+if !options[:no_terminal] && RUBY_PLATFORM.include?("darwin")
+  terminal_opened, terminal_warning = open_terminal_window(session, root)
+elsif !options[:no_terminal]
+  terminal_warning = "Auto-open is macOS/Ghostty only; attach manually with: #{manual_attach_command(session)}"
+end
 
 print_observation_info(
   session:          session,
@@ -384,5 +761,9 @@ print_observation_info(
   task_path:        task_path,
   last_msg_path:    last_msg_path,
   done_path:        done_path,
-  terminal_opened:  terminal_opened
+  pre_status_path:  pre_status_path,
+  pre_diff_path:    pre_diff_path,
+  dirty_at_launch:  dirty_at_launch,
+  terminal_opened:  terminal_opened,
+  terminal_warning: terminal_warning
 )

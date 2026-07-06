@@ -54,6 +54,54 @@ class CodexBuildTest < Minitest::Test
     end
   end
 
+  def test_uses_repo_root_dot_claude_claude_md
+    with_repo do |repo|
+      FileUtils.mkdir_p(File.join(repo, ".claude"))
+      File.write(File.join(repo, ".claude", "CLAUDE.md"), "Nested Claude context here. Run make test.")
+
+      stdout = dry_run(repo, "--intent", "x")
+
+      assert_includes stdout, ".claude/CLAUDE.md"
+      assert_includes stdout, "Nested Claude context here."
+      assert_includes stdout, "Check:   make test"
+    end
+  end
+
+  def test_ignores_ancestor_dot_claude_claude_md
+    with_repo do |repo, parent|
+      FileUtils.mkdir_p(File.join(parent, ".claude"))
+      File.write(File.join(parent, ".claude", "CLAUDE.md"), "Ancestor nested Claude. Run make test.")
+
+      stdout = dry_run(repo, "--intent", "x")
+
+      refute_includes stdout, "Ancestor nested Claude."
+      assert_includes stdout, "Check:   (none)"
+    end
+  end
+
+  def test_ancestor_bundle_orders_parent_before_repo_root
+    with_repo do |repo, parent|
+      File.write(File.join(parent, "AGENTS.md"), "Parent authority.")
+      File.write(File.join(repo, "AGENTS.md"), "Repo authority.")
+
+      stdout = dry_run(repo, "--intent", "x")
+
+      assert_includes stdout, "Project context (auto-loaded from authority files"
+      assert_operator stdout.index("Parent authority."), :<, stdout.index("Repo authority.")
+    end
+  end
+
+  def test_check_detection_ignores_ancestor_authority_files
+    with_repo do |repo, parent|
+      File.write(File.join(parent, "AGENTS.md"), "Parent says run rake test.")
+
+      stdout = dry_run(repo, "--intent", "x")
+
+      assert_includes stdout, "Check:   (none)"
+      refute_includes stdout, "<verification>"
+    end
+  end
+
   def test_omits_context_and_verification_blocks_when_nothing_found
     with_repo do |repo|
       stdout = dry_run(repo, "--intent", "x")
@@ -86,6 +134,64 @@ class CodexBuildTest < Minitest::Test
     end
   end
 
+  def test_final_message_contract_lands_in_prompt
+    with_repo do |repo|
+      stdout = dry_run(repo, "--intent", "x")
+
+      assert_includes stdout, "<final_message>"
+      assert_includes stdout, "Files changed"
+      assert_includes stdout, "Deviations from the plan"
+      assert_includes stdout, "Commands run and their results"
+      assert_includes stdout, "Known gaps / risks"
+      assert_includes stdout, "Questions needing the user's decision"
+    end
+  end
+
+  def test_feedback_dry_run_prints_resume_command_and_prompt
+    with_repo do |repo|
+      stdout = dry_run(repo, "--feedback", "Fix the missing assertion.")
+
+      assert_includes stdout, "Command: codex exec resume --last"
+      assert_includes stdout, "<feedback>\nFix the missing assertion.\n</feedback>"
+      assert_includes stdout, "## Feedback prompt"
+      refute_includes stdout, "<project_context>"
+    end
+  end
+
+  def test_feedback_refuses_plan_or_intent
+    with_repo do |repo|
+      File.write(File.join(repo, "plan.md"), "Plan.")
+
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby, SCRIPT, "--feedback", "fix", "--plan", "plan.md", "--dry-run", chdir: repo
+      )
+
+      refute status.success?
+      assert_includes stderr, "Cannot combine --feedback with --plan or --intent"
+
+      _stdout, stderr, status = Open3.capture3(
+        RbConfig.ruby, SCRIPT, "--feedback", "fix", "--intent", "x", "--dry-run", chdir: repo
+      )
+
+      refute status.success?
+      assert_includes stderr, "Cannot combine --feedback with --plan or --intent"
+    end
+  end
+
+  def test_model_and_effort_flags_appear_and_feedback_defaults_to_session_settings
+    with_repo do |repo|
+      stdout = dry_run(repo, "--intent", "x", "--effort", "low", "--model", "flag-model")
+
+      assert_includes stdout, "Effort:  low"
+      assert_includes stdout, "Model:   flag-model"
+
+      stdout = dry_run(repo, "--feedback", "fix")
+
+      assert_includes stdout, "Effort:  (session settings)"
+      assert_includes stdout, "Model:   (session settings)"
+    end
+  end
+
   def test_relative_plan_path_resolves_from_invoking_subdirectory
     with_repo do |repo|
       FileUtils.mkdir_p(File.join(repo, "docs"))
@@ -109,7 +215,7 @@ class CodexBuildTest < Minitest::Test
       )
 
       refute status.success?
-      assert_includes stderr, "--plan PATH or --intent TEXT"
+      assert_includes stderr, "--plan PATH, --intent TEXT, or --feedback TEXT"
     end
   end
 
@@ -126,11 +232,13 @@ class CodexBuildTest < Minitest::Test
 
   private
     def with_repo(&block)
-      Dir.mktmpdir("codex-build-test") do |repo|
+      Dir.mktmpdir("codex-build-test") do |parent|
+        repo = File.join(parent, "repo")
+        FileUtils.mkdir_p(repo)
         _stdout, _stderr, status = Open3.capture3("git", "init", "-q", repo)
         raise "git init failed" unless status.success?
 
-        block.call(repo)
+        block.call(repo, parent)
       end
     end
 
