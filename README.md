@@ -53,7 +53,7 @@ ruby scripts/codex_build.rb --plan docs/plan.md --dry-run
 ruby scripts/codex_build.rb --plan docs/plan.md --no-terminal
 ```
 
-In normal use you invoke `/codex-build` and Claude runs the script for you. `--model` overrides the Codex model, `--effort` sets reasoning effort, `--session` names the Zellij session, and `--dry-run` prints the assembled brief without launching anything.
+In normal use you invoke `/codex-build` and Claude runs the script for you. `--model` overrides the Codex model, `--effort` sets reasoning effort (default: high), `--session` names the Zellij session, and `--dry-run` prints the assembled brief without launching anything.
 
 ## Feedback Loop
 
