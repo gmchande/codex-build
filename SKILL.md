@@ -8,7 +8,7 @@ description: Delegate an implementation task to Codex CLI in a visible Zellij pa
 Delegate an implementation task to Codex. The script reads authority files (`AGENTS.md` then
 `CLAUDE.md`) from broader ancestor directories through the repo root, plus repo-root
 `.claude/CLAUDE.md`, builds a structured prompt with project constraints, and launches `codex exec`
-in a visible Zellij pane. A done-marker, last-message file, and pre-run tree snapshot let you
+in a visible Zellij pane. A run log, done-marker, last-message file, and pre-run tree snapshot let you
 observe completion without blocking the session.
 
 ## Requirements
@@ -63,9 +63,9 @@ The done marker contains Codex's exit code. Once it appears:
 
 1. Read the marker. `0` means Codex finished; anything else means the run failed.
 2. On success, read the last-message file, then review the implementation (below).
-3. On failure, dump the pane tail to diagnose
-   (`zellij --session SESSION action dump-screen --pane-id PANE`) and report the
-   error — do not present the run as complete.
+3. On failure, read `build.error` first; it contains the last run-log lines with ANSI escape
+   sequences stripped and survives session cleanup and reboots. Report that error — do not present
+   the run as complete.
 
 If the launch output says the tree was dirty, compare `git status --short` and `git diff` against
 the printed `pre.status` and `pre.diff` files before attributing a change to Codex.
@@ -137,9 +137,8 @@ a bare resume re-reads config rather than keeping the original run's settings).
 Let the user watch in Zellij. For harness-driven use, prefer the printed bounded background watcher
 command; Claude Code re-invokes the session when a background command exits, which is better than
 periodic polling. For other clients, fall back to checking the done marker after 2-3 minutes, then
-poll cheaply: `test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request, on a
-non-zero marker, or to diagnose a stall. Use `dump-screen` (viewport only) rather than full
-transcript dumps.
+poll cheaply: `test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request or to
+diagnose a still-running stall. Use `dump-screen` (viewport only) rather than full transcript dumps.
 
 After triage is complete, clean up the Zellij session with the printed cleanup command. If it is
 still attached, run `zellij kill-session SESSION` first, then

@@ -30,7 +30,7 @@ options = {
   check:            nil,
   session:          nil,
   sandbox:          "workspace-write",
-  effort:           nil,
+  effort:           "high",
   model:            nil,
   explicit_sandbox: false,
   doctor:           false,
@@ -49,7 +49,7 @@ OptionParser.new do |opts|
     options[:sandbox] = v
     options[:explicit_sandbox] = true
   end
-  opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh)") do |v|
+  opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh; default: high)") do |v|
     options[:effort] = v
   end
   opts.on("--model MODEL",  "Codex model") do |v|
@@ -458,13 +458,16 @@ def codex_resume_command(last_msg_path:, sandbox:, explicit_sandbox:, effort:, m
   codex_cmd
 end
 
-def codex_shell_command(codex_cmd, task_path, done_path)
+def codex_shell_command(codex_cmd, task_path, done_path, run_log_path, error_path)
   # The marker is always written and carries codex's exit code, so a failed run
   # (auth error, CLI crash) is distinguishable from success without inspecting
   # the pane. `touch` or `&&` would make failure look like a hung or green run.
+  ansi_filter = "ruby -pe '$_.gsub!(/\\e\\[[0-?]*[ -\\/]*[@-~]/, \"\")'"
+  codex_inner_cmd = "#{codex_cmd.shelljoin} < #{task_path.shellescape}"
   [
-    "#{codex_cmd.shelljoin} < #{task_path.shellescape}",
+    ["script", "-q", run_log_path, "sh", "-c", codex_inner_cmd].shelljoin,
     "rc=$?",
+    "if [ \"$rc\" -ne 0 ]; then tail -n 40 #{run_log_path.shellescape} | #{ansi_filter} > #{error_path.shellescape}; fi",
     "echo $rc > #{done_path.shellescape}",
     "echo",
     "echo Codex build exited with status $rc",
@@ -472,8 +475,8 @@ def codex_shell_command(codex_cmd, task_path, done_path)
   ].join("; ")
 end
 
-def launch_codex_pane(session:, repo_root:, task_path:, done_path:, codex_cmd:, pane_name:)
-  shell_cmd = codex_shell_command(codex_cmd, task_path, done_path)
+def launch_codex_pane(session:, repo_root:, task_path:, done_path:, run_log_path:, error_path:, codex_cmd:, pane_name:)
+  shell_cmd = codex_shell_command(codex_cmd, task_path, done_path, run_log_path, error_path)
 
   _stdout, stderr, status = zellij("attach", "--create-background", session, allow_failure: true)
   unless status.success?
@@ -567,12 +570,13 @@ def open_terminal_window(session, repo_root)
   [false, "Could not auto-open Ghostty#{detail}; attach manually with: #{manual_attach_command(session)}"]
 end
 
-def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_path:, pre_status_path:, pre_diff_path:, dirty_at_launch:, terminal_opened:, terminal_warning:)
+def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_path:, run_log_path:, error_path:, pre_status_path:, pre_diff_path:, dirty_at_launch:, terminal_opened:, terminal_warning:)
   puts "Codex build started in Zellij session: #{session}"
   puts "Zellij pane:  #{pane_id}"
   puts "Task bundle:  #{task_path}"
   puts "Last message: #{last_msg_path}"
   puts "Done marker:  #{done_path}"
+  puts "Run log:      #{run_log_path}"
   puts "Pre status:   #{pre_status_path}"
   puts "Pre diff:     #{pre_diff_path}"
   puts
@@ -596,6 +600,7 @@ def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_
   puts "Completion check (marker holds codex's exit code):"
   puts "  test -f #{done_path.shellescape} && cat #{done_path.shellescape}"
   puts "  test -f #{done_path.shellescape} && [ \"$(cat #{done_path.shellescape})\" = \"0\" ] && cat #{last_msg_path.shellescape}"
+  puts "Failure detail: test -f #{done_path.shellescape} && [ \"$(cat #{done_path.shellescape})\" != \"0\" ] && cat #{error_path.shellescape}"
   puts
   puts "Background watcher (bounded; exits when marker appears):"
   puts "  for i in $(seq 1 360); do test -f #{done_path.shellescape} && break; sleep 5; done; cat #{done_path.shellescape}"
@@ -712,9 +717,11 @@ temp_dir      = setup_temp_dir(session)
 task_path     = File.join(temp_dir, "task.md")
 last_msg_path = File.join(temp_dir, "last.md")
 done_path     = File.join(temp_dir, "build.done")
+run_log_path  = File.join(temp_dir, "run.log")
+error_path    = File.join(temp_dir, "build.error")
 # Clear stale completion files so a reused --session NAME with the same tmp dir
 # does not report the previous run as finished before the new one completes.
-FileUtils.rm_f([last_msg_path, done_path])
+FileUtils.rm_f([last_msg_path, done_path, run_log_path, error_path])
 write_private_file(task_path, prompt)
 pre_status_path, pre_diff_path, dirty_at_launch = write_pre_run_snapshot(temp_dir)
 
@@ -742,6 +749,8 @@ pane_id = launch_codex_pane(
   repo_root:    root,
   task_path:    task_path,
   done_path:    done_path,
+  run_log_path: run_log_path,
+  error_path:   error_path,
   codex_cmd:    codex_cmd,
   pane_name:    options[:feedback] ? "Codex Feedback" : "Codex Build"
 )
@@ -760,6 +769,8 @@ print_observation_info(
   task_path:        task_path,
   last_msg_path:    last_msg_path,
   done_path:        done_path,
+  run_log_path:     run_log_path,
+  error_path:       error_path,
   pre_status_path:  pre_status_path,
   pre_diff_path:    pre_diff_path,
   dirty_at_launch:  dirty_at_launch,

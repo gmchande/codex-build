@@ -34,6 +34,8 @@ ruby scripts/codex_build.rb --doctor
 4. It launches `codex exec` in a visible Zellij pane and opens a Ghostty tab attached to it, so you can watch Codex work and interrupt whenever you want.
 5. Before launch, it writes `pre.status` and `pre.diff` in a private temp dir. When Codex exits, it writes a done marker carrying Codex's exit code and a file with Codex's last message. Claude waits on the marker, then reviews the real diff, not Codex's self-summary, against your plan and constraints.
 
+Each run also keeps a `run.log` transcript in the private temp dir. If Codex exits non-zero, the shell epilogue writes the last log lines, with ANSI escape sequences stripped, to `build.error` so failure details survive Zellij session cleanup.
+
 The brief Codex receives is one prompt bundle: the task, the project context from authority files, a short action-safety note, the verification command, and a final-message contract requiring Codex to report files changed, deviations, commands, risks, and questions.
 
 ## Flags

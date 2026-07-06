@@ -3,6 +3,7 @@
 require "minitest/autorun"
 require "open3"
 require "fileutils"
+require "shellwords"
 require "tmpdir"
 
 class CodexBuildTest < Minitest::Test
@@ -158,6 +159,62 @@ class CodexBuildTest < Minitest::Test
     end
   end
 
+  def test_launch_shell_wraps_codex_in_script_and_writes_failure_tail
+    with_repo do |repo|
+      session = "codex-build-shell-#{Process.pid}-#{rand(1_000_000)}"
+      result = launch_with_fake_tools(repo, "--intent", "x", "--session", session)
+      script_args = script_command_args(result[:shell])
+
+      assert result[:status].success?, result[:stderr]
+      assert_equal ["script", "-q"], script_args[0, 2]
+      assert_equal File.join(Dir.tmpdir, "codex-build-#{session}", "run.log"), script_args[2]
+      assert_equal ["sh", "-c"], script_args[3, 2]
+      assert_includes script_args[5], "codex exec --sandbox workspace-write"
+      assert_includes script_args[5], " < "
+      assert_includes script_args[5], File.join(Dir.tmpdir, "codex-build-#{session}", "task.md")
+      assert_includes result[:shell], "rc=$?"
+      assert_includes result[:shell], "tail -n 40 "
+      assert_includes result[:shell], "ruby -pe"
+      assert_includes result[:shell], "build.error"
+      assert_includes result[:stdout], "Run log:      "
+      assert_includes result[:stdout], "run.log"
+      assert_includes result[:stdout], "Failure detail: test -f "
+      assert_includes result[:stdout], "build.error"
+    ensure
+      FileUtils.rm_rf(File.join(Dir.tmpdir, "codex-build-#{session}")) if session
+    end
+  end
+
+  def test_feedback_launch_uses_same_script_wrapped_shell
+    with_repo do |repo|
+      session = "codex-feedback-shell-#{Process.pid}-#{rand(1_000_000)}"
+      result = launch_with_fake_tools(repo, "--feedback", "fix it", "--session", session)
+      script_args = script_command_args(result[:shell])
+
+      assert result[:status].success?, result[:stderr]
+      assert_equal ["script", "-q"], script_args[0, 2]
+      assert_equal File.join(Dir.tmpdir, "codex-build-#{session}", "run.log"), script_args[2]
+      assert_equal ["sh", "-c"], script_args[3, 2]
+      assert_includes script_args[5], "codex exec resume --last"
+      assert_includes script_args[5], " < "
+      assert_includes script_args[5], File.join(Dir.tmpdir, "codex-build-#{session}", "task.md")
+      assert_includes result[:shell], "tail -n 40 "
+      assert_includes result[:shell], "build.error"
+    ensure
+      FileUtils.rm_rf(File.join(Dir.tmpdir, "codex-build-#{session}")) if session
+    end
+  end
+
+  def test_macos_script_propagates_child_exit_code
+    skip "macOS script(1) syntax only" unless RUBY_PLATFORM.include?("darwin")
+
+    Dir.mktmpdir("codex-build-script-test") do |dir|
+      _stdout, _stderr, status = Open3.capture3("script", "-q", File.join(dir, "run.log"), "sh", "-c", "exit 3")
+
+      assert_equal 3, status.exitstatus
+    end
+  end
+
   def test_feedback_refuses_plan_or_intent
     with_repo do |repo|
       File.write(File.join(repo, "plan.md"), "Plan.")
@@ -187,7 +244,7 @@ class CodexBuildTest < Minitest::Test
 
       stdout = dry_run(repo, "--feedback", "fix")
 
-      assert_includes stdout, "Effort:  (codex default)"
+      assert_includes stdout, "Effort:  high"
       assert_includes stdout, "Model:   (codex default)"
     end
   end
@@ -249,5 +306,67 @@ class CodexBuildTest < Minitest::Test
       raise "dry-run failed: #{stderr}" unless status.success?
 
       stdout
+    end
+
+    def launch_with_fake_tools(repo, *args)
+      Dir.mktmpdir("codex-build-fakes") do |dir|
+        bin_dir = File.join(dir, "bin")
+        shell_log = File.join(dir, "shell.log")
+        FileUtils.mkdir_p(bin_dir)
+        write_fake_zellij(File.join(bin_dir, "zellij"))
+        write_fake_codex(File.join(bin_dir, "codex"))
+
+        env = {
+          "CODEX_BUILD_SHELL_LOG" => shell_log,
+          "PATH" => "#{bin_dir}#{File::PATH_SEPARATOR}#{ENV.fetch("PATH")}",
+          "ZELLIJ_SOCKET_DIR" => File.join(dir, "zellij-sockets")
+        }
+        stdout, stderr, status = Open3.capture3(
+          env, RbConfig.ruby, SCRIPT, *args, "--no-terminal", chdir: repo
+        )
+
+        {
+          stdout: stdout,
+          stderr: stderr,
+          status: status,
+          shell: File.exist?(shell_log) ? File.read(shell_log) : ""
+        }
+      end
+    end
+
+    def script_command_args(shell)
+      Shellwords.split(shell.split("; ").first)
+    end
+
+    def write_fake_zellij(path)
+      File.write(path, <<~RUBY)
+        #!/usr/bin/env ruby
+        if ARGV.include?("run")
+          if (index = ARGV.index("-lc")) && ARGV[index + 1] && ENV["CODEX_BUILD_SHELL_LOG"]
+            File.write(ENV.fetch("CODEX_BUILD_SHELL_LOG"), ARGV[index + 1])
+          end
+          puts "terminal_42"
+          exit 0
+        end
+
+        if ARGV.include?("list-panes")
+          puts "terminal_42 terminal"
+          exit 0
+        end
+
+        exit 0
+      RUBY
+      FileUtils.chmod(0o755, path)
+    end
+
+    def write_fake_codex(path)
+      File.write(path, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "exec" ] && [ "$2" = "resume" ] && [ "$3" = "--help" ]; then
+          printf '%s\\n' '--sandbox MODE' '-c KEY=VALUE' '-m MODEL'
+        fi
+        exit 0
+      SH
+      FileUtils.chmod(0o755, path)
     end
 end
