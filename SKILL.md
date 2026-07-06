@@ -129,7 +129,8 @@ exclusive with `--plan` and `--intent`.
 
 Use `--dry-run --feedback "..."` to inspect the resume command and feedback prompt before launching.
 Explicit `--model` and `--effort` are passed to resume only when the installed Codex CLI reports
-support for those flags; otherwise the resumed session keeps its original settings.
+support for those flags; otherwise codex falls back to its own config defaults (verified:
+a bare resume re-reads config rather than keeping the original run's settings).
 
 ## Observation policy
 

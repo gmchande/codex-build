@@ -669,9 +669,8 @@ prompt = if options[:feedback]
 
 if options[:dry_run]
   puts "Sandbox: #{options[:sandbox]}"
-  default_settings = options[:feedback] ? "(session settings)" : "(codex default)"
-  puts "Effort:  #{options[:effort] || default_settings}"
-  puts "Model:   #{options[:model]  || default_settings}"
+  puts "Effort:  #{options[:effort] || "(codex default)"}"
+  puts "Model:   #{options[:model]  || "(codex default)"}"
   puts "Session: #{session}"
   puts "Context: #{context_paths.empty? ? "(none found)" : context_paths.join(", ")}"
   puts "Context truncation: #{context_truncated.empty? ? "(none)" : context_truncated.join(", ")}"

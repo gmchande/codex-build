@@ -187,8 +187,8 @@ class CodexBuildTest < Minitest::Test
 
       stdout = dry_run(repo, "--feedback", "fix")
 
-      assert_includes stdout, "Effort:  (session settings)"
-      assert_includes stdout, "Model:   (session settings)"
+      assert_includes stdout, "Effort:  (codex default)"
+      assert_includes stdout, "Model:   (codex default)"
     end
   end
 
