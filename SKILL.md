@@ -1,151 +1,91 @@
 ---
 name: codex-build
-description: Delegate an implementation task to Codex CLI in a visible Zellij pane, injecting ancestor AGENTS.md/CLAUDE.md and repo-root .claude/CLAUDE.md project constraints into the brief. Use when the user wants to implement a plan or PRD with Codex, says "have Codex build this", "send this to Codex", "delegate to Codex", or "/codex-build".
+description: Delegate an implementation task from Claude Code to Codex CLI in one visible Zellij session, with repo authority and verification context bundled automatically. Use when the user asks Claude to have Codex build or implement a plan, says "send this to Codex" or "delegate this build", or invokes `/codex-build`.
 ---
 
-# codex-build
+# Codex Build
 
-Delegate an implementation task to Codex. The script reads authority files (`AGENTS.md` then
-`CLAUDE.md`) from broader ancestor directories through the repo root, plus repo-root
-`.claude/CLAUDE.md`, builds a structured prompt with project constraints, and launches `codex exec`
-in a visible Zellij pane. A run log, done-marker, last-message file, and pre-run tree snapshot let you
-observe completion without blocking the session.
+Use Codex as the implementation worker while Claude keeps the planning and review role. Launch one visible session, let Codex work in the target repo, then judge the actual diff before reporting success.
 
-## Requirements
+## Defaults
 
-- Zellij: `brew install zellij`
-- `ZELLIJ_SOCKET_DIR` in shell startup: `export ZELLIJ_SOCKET_DIR=/tmp/zellij`
-- Codex CLI installed and authenticated: `npm install -g @openai/codex && codex login`
-- Ghostty for the auto-opened attach tab (optional — without it, use the printed
-  `zellij attach` command from any terminal)
+- Model: Sol (`gpt-5.6-sol`).
+- Reasoning effort: `high`.
+- Sandbox: `workspace-write`.
+- Zellij socket: automatic stable per-user path when `ZELLIJ_SOCKET_DIR` is unset.
+- Session name: collision-safe generated name.
 
-Run `ruby $SKILL_BASE/scripts/codex_build.rb --doctor` to check required and optional local tools.
+Override model, effort, or sandbox only when the user or task requires it.
 
-## Run the script
+## Launch
 
-The skill base directory is shown in the system-reminder as "Base directory for this skill: PATH".
-Refer to it as `$SKILL_BASE` below.
-
-1. Confirm you are inside a git repo.
-2. Collect the plan path (`--plan PATH`) or intent string (`--intent "..."`) from the request.
-3. Run the script from the project repo root:
+1. Confirm the target Git repo root. Do not launch from a parent containing unrelated repos.
+2. Capture the implementation request as either a plan file or concise intent.
+3. Run from the target repo:
 
 ```sh
-ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md
-ruby $SKILL_BASE/scripts/codex_build.rb --intent "implement the broker sync"
+/path/to/codex-build/scripts/codex_build.rb --plan docs/plan.md
+/path/to/codex-build/scripts/codex_build.rb --intent "Implement the broker sync"
 ```
 
-Useful flags:
+The helper automatically bundles ancestor and repo authority files, including `AGENTS.md`, `CLAUDE.md`, and repo-root `.claude/CLAUDE.md`. It also records the pre-run status and diff so existing changes are not misattributed to Codex.
 
-```sh
-# Supply the check command explicitly (auto-detected from AGENTS.md if omitted)
-ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --check "bundle exec rake check"
+Useful options:
 
-# Tune model and effort
-ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --effort high --model gpt-5.4-mini
+- `--check CMD` supplies the completion check when authority files do not name one.
+- `--model MODEL`, `--effort LEVEL`, and `--sandbox MODE` override defaults.
+- `--dry-run` prints the exact prompt and command settings.
+- `--doctor` checks installed dependencies; no shell socket setup is required.
+- `--no-terminal` skips Ghostty auto-open while keeping the Zellij session.
 
-# Verify the prompt before sending
-ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --dry-run
+## Observe
 
-# Skip opening a terminal window attached to the session
-ruby $SKILL_BASE/scripts/codex_build.rb --plan docs/plan.md --no-terminal
+Let the user watch the visible pane. Prefer the printed bounded watcher in Claude Code. Otherwise check the done marker after 2-3 minutes. Treat the marker, last-message file, run log, and `build.error` as the completion truth; do not diagnose from pane appearance alone.
 
-# Send accepted review findings back to the latest Codex session for this repo
-ruby $SKILL_BASE/scripts/codex_build.rb --feedback "Fix only these accepted findings: ..."
-```
+Leave the session open for follow-up work. Clean it up only when the user says the run is finished.
 
-4. The script prints the done-marker path and completion check command. Share these with the user
-   so they know how to observe the run.
+## Review and Stop
 
-## After Codex finishes
+Codex's last message is evidence, not the result. After a successful marker:
 
-The done marker contains Codex's exit code. Once it appears:
-
-1. Read the marker. `0` means Codex finished; anything else means the run failed.
-2. On success, read the last-message file, then review the implementation (below).
-3. On failure, read `build.error` first; it contains the last run-log lines with ANSI escape
-   sequences stripped and survives session cleanup and reboots. Report that error — do not present
-   the run as complete.
-
-If the launch output says the tree was dirty, compare `git status --short` and `git diff` against
-the printed `pre.status` and `pre.diff` files before attributing a change to Codex.
-
-## Review the implementation
-
-Codex's last message is its own summary of its own work. Do not relay it as the
-result — review the actual diff first (`git status --short`, `git diff`, and any
-new untracked files).
-
-Reviewer posture: pragmatic review for a serious small experiment. Judge the
-diff against, in order:
-
-1. **The plan** — was it followed? Did Codex deviate, and did it call the
-   deviation out and justify it? An unannounced deviation is a finding even
-   when the code is fine.
-2. **Project constraints** — the repo's AGENTS.md rules: style, stack, scope,
-   privacy/safety boundaries. A violation of a stated rule is a finding.
-3. **Correctness** — bugs, broken flows, tests that pass without testing the
-   behavior, missing essential cases.
-
-Do not be pedantic: no style preferences beyond the project's stated rules, no
-speculative scale or robustness concerns, no "this might matter someday"
-findings, no refactors the plan did not ask for.
-
-Run the project's check command and include the result.
-
-Then walk the user through what came back and stop for their go-ahead before
-editing:
+1. Compare current status and diff with the pre-run snapshot.
+2. Review the actual implementation against the plan, repo authority, and behavioural correctness.
+3. Run the named check command.
+4. Stop at this checkpoint before editing:
 
 ```md
-Codex implemented: [one-paragraph summary, from the diff not the last message]
+Codex implemented: [summary from the diff]
 
 Holds up:
-- [decision]: [why it is right]
+- [decision]: [why]
 
 Worth changing:
-- [finding]: [why, and the smallest fix]
+- [finding]: [smallest fix]
 
 Open questions:
-- [anything only the user can decide — scope, tradeoffs, taste]
+- [user decision]
 
-Checks: [check command result]
+Checks: [command and result]
 
 Next steps:
-- [ordered fixes; for each, whether to fix directly or loop back to Codex]
+- [accepted-finding plan]
 ```
 
-If nothing is worth changing, say so plainly and note any residual risk or test
-gap. Skip empty sections.
-When the diff is large, touches a trust or privacy boundary, or your confidence
-is low, escalate to a deeper independent review (a second reviewer or a dedicated
-review tool) rather than treating this pass as the last word. Not by default.
+Skip empty sections. If nothing needs changing, say so and name any residual risk.
 
-## Feedback loop
+## Feedback
 
-Use `--feedback TEXT` only after the review checkpoint above, and send only user-accepted findings
-back to the same Codex session. It runs `codex exec resume --last` from the repo root with a small
-feedback prompt; it does not re-inject the project context bundle. `--feedback` is mutually
-exclusive with `--plan` and `--intent`.
+After the user accepts findings, send only those findings back to the same Codex session:
 
-Use `--dry-run --feedback "..."` to inspect the resume command and feedback prompt before launching.
-Explicit `--model` and `--effort` are passed to resume only when the installed Codex CLI reports
-support for those flags; otherwise codex falls back to its own config defaults (verified:
-a bare resume re-reads config rather than keeping the original run's settings).
+```sh
+/path/to/codex-build/scripts/codex_build.rb \
+  --feedback "Fix only these accepted findings: ..."
+```
 
-## Observation policy
+The feedback run resumes the latest Codex session and inherits its model and reasoning effort. Pass `--model` or `--effort` explicitly only when the follow-up should change them.
 
-Let the user watch in Zellij. For harness-driven use, prefer the printed bounded background watcher
-command; Claude Code re-invokes the session when a background command exits, which is better than
-periodic polling. For other clients, fall back to checking the done marker after 2-3 minutes, then
-poll cheaply: `test -f /tmp/codex-build-SESSION/build.done`. Inspect the pane only on request or to
-diagnose a still-running stall. Use `dump-screen` (viewport only) rather than full transcript dumps.
+## Do Not Use For
 
-Leave the Zellij session open after triage; the user often has follow-up prompts, and both
-`--feedback` and `codex resume --last` reach the same Codex session from the repo root. Clean up
-with the printed commands only when the user says they are done with the run.
-
-## Do not use for
-
-- Code review: use a dedicated code-review tool or fresh-eyes review pass
-- Bug investigation: drive it directly, or use a debugging-focused tool
-- Tasks Claude can complete directly in the current session
+- Code review or fresh-eyes review.
+- Open-ended diagnosis where the cause is still unknown.
+- Work Claude should implement directly in the current session.

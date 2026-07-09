@@ -153,6 +153,10 @@ class CodexBuildTest < Minitest::Test
       stdout = dry_run(repo, "--feedback", "Fix the missing assertion.")
 
       assert_includes stdout, "Command: codex exec resume --last"
+      assert_includes stdout, "Effort:  (inherit session)"
+      assert_includes stdout, "Model:   (inherit session)"
+      refute_includes stdout, "model_reasoning_effort="
+      refute_match(/Command: .* -m /, stdout)
       assert_includes stdout, "<feedback>\nFix the missing assertion.\n</feedback>"
       assert_includes stdout, "## Feedback prompt"
       refute_includes stdout, "<project_context>"
@@ -170,6 +174,8 @@ class CodexBuildTest < Minitest::Test
       assert_equal File.join(Dir.tmpdir, "codex-build-#{session}", "run.log"), script_args[2]
       assert_equal ["sh", "-c"], script_args[3, 2]
       assert_includes script_args[5], "codex exec --sandbox workspace-write"
+      assert_includes script_args[5].delete("\\"), "model_reasoning_effort=high"
+      assert_includes script_args[5], "gpt-5.6-sol"
       assert_includes script_args[5], " < "
       assert_includes script_args[5], File.join(Dir.tmpdir, "codex-build-#{session}", "task.md")
       assert_includes result[:shell], "rc=$?"
@@ -178,6 +184,7 @@ class CodexBuildTest < Minitest::Test
       assert_includes result[:shell], "build.error"
       assert_includes result[:stdout], "Run log:      "
       assert_includes result[:stdout], "run.log"
+      assert_includes result[:stdout], "/tmp/zellij-#{Process.uid}"
       assert_includes result[:stdout], "Failure detail: test -f "
       assert_includes result[:stdout], "build.error"
     ensure
@@ -196,6 +203,8 @@ class CodexBuildTest < Minitest::Test
       assert_equal File.join(Dir.tmpdir, "codex-build-#{session}", "run.log"), script_args[2]
       assert_equal ["sh", "-c"], script_args[3, 2]
       assert_includes script_args[5], "codex exec resume --last"
+      refute_includes script_args[5], "model_reasoning_effort="
+      refute_match(/codex exec resume --last.* -m /, script_args[5])
       assert_includes script_args[5], " < "
       assert_includes script_args[5], File.join(Dir.tmpdir, "codex-build-#{session}", "task.md")
       assert_includes result[:shell], "tail -n 40 "
@@ -235,17 +244,31 @@ class CodexBuildTest < Minitest::Test
     end
   end
 
-  def test_model_and_effort_flags_appear_and_feedback_defaults_to_session_settings
+  def test_model_and_effort_flags_appear_and_feedback_overrides_are_explicit
     with_repo do |repo|
       stdout = dry_run(repo, "--intent", "x", "--effort", "low", "--model", "flag-model")
 
       assert_includes stdout, "Effort:  low"
       assert_includes stdout, "Model:   flag-model"
 
-      stdout = dry_run(repo, "--feedback", "fix")
+      stdout = dry_run(repo, "--feedback", "fix", "--effort", "low", "--model", "flag-model")
 
-      assert_includes stdout, "Effort:  high"
-      assert_includes stdout, "Model:   (codex default)"
+      assert_includes stdout, "Effort:  low"
+      assert_includes stdout, "Model:   flag-model"
+      assert_includes stdout.delete("\\"), "model_reasoning_effort=low"
+      assert_match(/Command: .* -m flag-model/, stdout)
+    end
+  end
+
+  def test_generated_session_names_are_collision_safe
+    with_repo do |repo|
+      first = dry_run(repo, "--intent", "first")[/^Session: (.+)$/, 1]
+      second = dry_run(repo, "--intent", "second")[/^Session: (.+)$/, 1]
+
+      refute_nil first
+      refute_nil second
+      refute_equal first, second
+      assert_match(/\Acodex-build-\d{6}-\d{6}-\d+\z/, first)
     end
   end
 
@@ -319,7 +342,7 @@ class CodexBuildTest < Minitest::Test
         env = {
           "CODEX_BUILD_SHELL_LOG" => shell_log,
           "PATH" => "#{bin_dir}#{File::PATH_SEPARATOR}#{ENV.fetch("PATH")}",
-          "ZELLIJ_SOCKET_DIR" => File.join(dir, "zellij-sockets")
+          "ZELLIJ_SOCKET_DIR" => nil
         }
         stdout, stderr, status = Open3.capture3(
           env, RbConfig.ruby, SCRIPT, *args, "--no-terminal", chdir: repo

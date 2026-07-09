@@ -13,6 +13,8 @@ REPO_ROOT_AUTHORITY_CONTEXT_FILES = (AUTHORITY_CONTEXT_FILES + %w[.claude/CLAUDE
 MAX_CONTEXT_BYTES                 = 100_000
 MAX_CONTEXT_BUNDLE_BYTES          = 240_000
 MAX_PLAN_BYTES                    = 200_000
+DEFAULT_MODEL                     = ENV.fetch("CODEX_BUILD_MODEL", "gpt-5.6-sol")
+DEFAULT_EFFORT                    = ENV.fetch("CODEX_BUILD_EFFORT", "high")
 CHECK_PATTERNS                    = [
   /bundle exec rake \w+/,
   /rake (?:check|test)/,
@@ -30,9 +32,11 @@ options = {
   check:            nil,
   session:          nil,
   sandbox:          "workspace-write",
-  effort:           "high",
-  model:            nil,
+  effort:           DEFAULT_EFFORT,
+  model:            DEFAULT_MODEL,
   explicit_sandbox: false,
+  explicit_effort:  false,
+  explicit_model:   false,
   doctor:           false,
   dry_run:          false,
   no_terminal:      false
@@ -44,16 +48,18 @@ OptionParser.new do |opts|
   opts.on("--intent TEXT",  "Short intent string (alternative to --plan)")                  { |v| options[:intent]     = v }
   opts.on("--feedback TEXT", "Send review findings to the most recent Codex session")       { |v| options[:feedback]   = v }
   opts.on("--check CMD",    "Check command to run on completion (auto-detected if omitted)") { |v| options[:check]     = v }
-  opts.on("--session NAME", "Zellij session name (default: codex-build-HHMMSS)")            { |v| options[:session]   = v }
+  opts.on("--session NAME", "Zellij session name (default: collision-safe generated name)") { |v| options[:session]  = v }
   opts.on("--sandbox MODE", "Codex sandbox mode (default: workspace-write)") do |v|
     options[:sandbox] = v
     options[:explicit_sandbox] = true
   end
-  opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh; default: high)") do |v|
+  opts.on("--effort LEVEL", "Codex reasoning effort (none|minimal|low|medium|high|xhigh; default: #{DEFAULT_EFFORT})") do |v|
     options[:effort] = v
+    options[:explicit_effort] = true
   end
-  opts.on("--model MODEL",  "Codex model") do |v|
+  opts.on("--model MODEL",  "Codex model (default: #{DEFAULT_MODEL})") do |v|
     options[:model] = v
+    options[:explicit_model] = true
   end
   opts.on("--doctor",       "Check local dependencies and exit")                            {      options[:doctor]      = true }
   opts.on("--dry-run",      "Print the prompt bundle without running")                      {      options[:dry_run]     = true }
@@ -112,7 +118,7 @@ def session_name(options)
   return options[:session] if options[:session]
 
   prefix = options[:feedback] ? "codex-feedback" : "codex-build"
-  "#{prefix}-#{Time.now.strftime("%H%M%S")}"
+  "#{prefix}-#{Time.now.strftime("%H%M%S-%6N")}-#{Process.pid}"
 end
 
 def likely_text_file?(path)
@@ -314,13 +320,9 @@ def ensure_command!(name, install_hint)
 end
 
 def ensure_zellij_socket_dir!
-  socket_dir = ENV.fetch("ZELLIJ_SOCKET_DIR", "")
-  if socket_dir.empty?
-    warn "ZELLIJ_SOCKET_DIR is not set."
-    warn "Add to shell startup: export ZELLIJ_SOCKET_DIR=/tmp/zellij"
-    warn "Then open a new terminal and rerun."
-    exit 1
-  end
+  socket_dir = ENV.fetch("ZELLIJ_SOCKET_DIR", "").strip
+  socket_dir = "/tmp/zellij-#{Process.uid}" if socket_dir.empty?
+  ENV["ZELLIJ_SOCKET_DIR"] = socket_dir
 
   begin
     FileUtils.mkdir_p(socket_dir)
@@ -328,6 +330,8 @@ def ensure_zellij_socket_dir!
     warn "Could not create ZELLIJ_SOCKET_DIR #{socket_dir.inspect}: #{e.message}"
     exit 1
   end
+
+  socket_dir
 end
 
 def macos_app_available?(name)
@@ -343,7 +347,8 @@ def doctor!
   required_checks << ["ruby", command_available?("ruby")]
   required_checks << ["zellij", command_available?("zellij")]
   required_checks << ["codex", command_available?("codex")]
-  required_checks << ["ZELLIJ_SOCKET_DIR", !ENV.fetch("ZELLIJ_SOCKET_DIR", "").empty?]
+  socket_dir = ensure_zellij_socket_dir!
+  required_checks << ["Zellij socket directory #{socket_dir}", Dir.exist?(socket_dir)]
 
   optional_checks = []
   optional_checks << ["osascript", command_available?("osascript")]
@@ -395,6 +400,10 @@ def zellij(*args, allow_failure: false)
     exit status.exitstatus || 1
   end
   [stdout, stderr, status]
+end
+
+def zellij_shell_command(*args)
+  (["env", "ZELLIJ_SOCKET_DIR=#{ENV.fetch("ZELLIJ_SOCKET_DIR")}", "zellij"] + args).shelljoin
 end
 
 def zellij_session_exists?(name)
@@ -545,7 +554,7 @@ def ghostty_script(attach_cmd, repo_root)
 end
 
 def manual_attach_command(session)
-  "zellij attach #{session.shellescape}"
+  zellij_shell_command("attach", session)
 end
 
 def open_terminal_window(session, repo_root)
@@ -606,19 +615,19 @@ def print_observation_info(session:, pane_id:, task_path:, last_msg_path:, done_
   puts "  for i in $(seq 1 360); do test -f #{done_path.shellescape} && break; sleep 5; done; cat #{done_path.shellescape}"
   puts
   puts "Interrupt:"
-  puts "  zellij --session #{session.shellescape} action send-keys --pane-id #{pane_id} Esc"
-  puts "  zellij --session #{session.shellescape} action send-keys --pane-id #{pane_id} \"Ctrl c\""
+  puts "  #{zellij_shell_command("--session", session, "action", "send-keys", "--pane-id", pane_id, "Esc")}"
+  puts "  #{zellij_shell_command("--session", session, "action", "send-keys", "--pane-id", pane_id, "Ctrl c")}"
   puts
   puts "Observe (viewport only):"
-  puts "  zellij --session #{session.shellescape} action dump-screen --pane-id #{pane_id}"
+  puts "  #{zellij_shell_command("--session", session, "action", "dump-screen", "--pane-id", pane_id)}"
   puts
   puts "Follow up in the same Codex session (from this repo root):"
   puts "  ruby #{File.expand_path(__FILE__).shellescape} --feedback \"...\""
   puts "  codex resume --last   # interactive"
   puts
   puts "Cleanup (only when the user says they are done with this run; leave the session open for follow-ups otherwise):"
-  puts "  zellij kill-session #{session.shellescape}  # if still attached"
-  puts "  zellij delete-session --force #{session.shellescape}"
+  puts "  #{zellij_shell_command("kill-session", session)}  # if still attached"
+  puts "  #{zellij_shell_command("delete-session", "--force", session)}"
   puts
   puts "Observation policy: prefer the background watcher in harness-driven clients; otherwise check the done marker after 2-3 minutes and inspect the pane only on request or to diagnose a stall."
 end
@@ -677,9 +686,20 @@ prompt = if options[:feedback]
          end
 
 if options[:dry_run]
+  display_effort = if options[:feedback] && !options[:explicit_effort]
+                     "(inherit session)"
+                   else
+                     options[:effort] || "(codex default)"
+                   end
+  display_model = if options[:feedback] && !options[:explicit_model]
+                    "(inherit session)"
+                  else
+                    options[:model] || "(codex default)"
+                  end
+
   puts "Sandbox: #{options[:sandbox]}"
-  puts "Effort:  #{options[:effort] || "(codex default)"}"
-  puts "Model:   #{options[:model]  || "(codex default)"}"
+  puts "Effort:  #{display_effort}"
+  puts "Model:   #{display_model}"
   puts "Session: #{session}"
   puts "Context: #{context_paths.empty? ? "(none found)" : context_paths.join(", ")}"
   puts "Context truncation: #{context_truncated.empty? ? "(none)" : context_truncated.join(", ")}"
@@ -693,8 +713,8 @@ if options[:dry_run]
       last_msg_path:    last_msg_path,
       sandbox:          options[:sandbox],
       explicit_sandbox: options[:explicit_sandbox],
-      effort:           options[:effort],
-      model:            options[:model],
+      effort:           options[:explicit_effort] ? options[:effort] : nil,
+      model:            options[:explicit_model] ? options[:model] : nil,
       help_text:        resume_help
     )
     puts "Command: #{codex_cmd.shelljoin}"
@@ -735,8 +755,8 @@ codex_cmd = if options[:feedback]
                 last_msg_path:    last_msg_path,
                 sandbox:          options[:sandbox],
                 explicit_sandbox: options[:explicit_sandbox],
-                effort:           options[:effort],
-                model:            options[:model],
+                effort:           options[:explicit_effort] ? options[:effort] : nil,
+                model:            options[:explicit_model] ? options[:model] : nil,
                 help_text:        resume_help
               )
             else
