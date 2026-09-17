@@ -1,3 +1,5 @@
+> **Superseded by [handoff](https://github.com/gmchande/handoff).** This skill is archived and no longer maintained.
+
 # codex-build
 
 Hand the implementation work to Codex while Claude keeps planning and reviewing, visibly, in one terminal. `codex-build` is an Agent Skill: it reads authority files (`AGENTS.md` then `CLAUDE.md`) from ancestor directories through the repo root, plus repo-root `.claude/CLAUDE.md`, folds those project constraints into a structured brief alongside your plan and check command, and launches `codex exec` in a visible Zellij pane. Claude stays the architect. It writes the plan, delegates the build, then reviews Codex's actual diff against the plan. Because it is a plain Agent Skill, it works in any Agent Skills client: Claude Code, Codex, Cursor, or Gemini CLI.
